@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -27,14 +28,15 @@ var (
 	rootFolderID  string
 	inboxFolderID string
 	attFolderID   string
+	tgAttFolderID string
 	allowedUserID int64
 )
 
 // --- Media group buffering ---
 
 type mediaGroupEntry struct {
-	msgs  []*models.Message
-	timer *time.Timer
+	msgs   []*models.Message
+	timer  *time.Timer
 	chatID int64
 }
 
@@ -72,7 +74,8 @@ func main() {
 	// Ensure folders exist
 	inboxFolderID = mustGetOrCreateFolder(rootFolderID, "inbox")
 	attFolderID = mustGetOrCreateFolder(rootFolderID, "attachments")
-	log.Printf("inbox=%s attachments=%s", inboxFolderID, attFolderID)
+	tgAttFolderID = mustGetOrCreateFolder(attFolderID, "tg")
+	log.Printf("inbox=%s attachments/tg=%s", inboxFolderID, tgAttFolderID)
 
 	// Init bot
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -85,6 +88,45 @@ func main() {
 
 	log.Println("bot started")
 	b.Start(ctx)
+}
+
+// --- Title generation ---
+
+func makeTitle(msg *models.Message, content string, kind string) string {
+	fwd := forwardInfo(msg)
+	summary := truncate(firstLine(content), 50)
+
+	switch {
+	case fwd != "" && summary != "":
+		return fmt.Sprintf("[tg] %s - %s", fwd, summary)
+	case fwd != "":
+		return fmt.Sprintf("[tg] %s", fwd)
+	case summary != "":
+		return fmt.Sprintf("[tg] %s", summary)
+	default:
+		return fmt.Sprintf("[tg] %s %s", kind, time.Now().Format("2006-01-02"))
+	}
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\n\r"); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+func truncate(s string, maxChars int) string {
+	if utf8.RuneCountInString(s) <= maxChars {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxChars]) + "..."
+}
+
+func sanitizeFolderName(name string) string {
+	r := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	return r.Replace(name)
 }
 
 // --- Router ---
@@ -171,31 +213,42 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 		return
 	}
 
-	var attachments []string
+	// Find caption from any message in the group
 	var caption string
-	firstMsg := entry.msgs[0]
+	for _, msg := range entry.msgs {
+		if msg.Caption != "" {
+			caption = msg.Caption
+			break
+		}
+	}
 
+	firstMsg := entry.msgs[0]
+	title := makeTitle(firstMsg, caption, "media")
+	folderName := sanitizeFolderName(title)
+	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+
+	var attachments []string
 	for i, msg := range entry.msgs {
 		var fileID string
-		var ext string
+		var fileName string
 		var mime string
 
 		switch {
 		case msg.Photo != nil:
 			photo := msg.Photo[len(msg.Photo)-1]
 			fileID = photo.FileID
-			ext = fmt.Sprintf("_photo_%d.jpg", i+1)
+			fileName = fmt.Sprintf("photo_%d.jpg", i+1)
 			mime = "image/jpeg"
 		case msg.Video != nil:
 			fileID = msg.Video.FileID
-			ext = fmt.Sprintf("_video_%d.mp4", i+1)
+			fileName = fmt.Sprintf("video_%d.mp4", i+1)
 			mime = "video/mp4"
 		case msg.Document != nil:
 			fileID = msg.Document.FileID
 			if msg.Document.FileName != "" {
-				ext = "_" + msg.Document.FileName
+				fileName = msg.Document.FileName
 			} else {
-				ext = fmt.Sprintf("_doc_%d", i+1)
+				fileName = fmt.Sprintf("doc_%d", i+1)
 			}
 			mime = msg.Document.MimeType
 			if mime == "" {
@@ -205,19 +258,14 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 			continue
 		}
 
-		if msg.Caption != "" {
-			caption = msg.Caption
-		}
-
 		data, err := downloadFile(ctx, b, fileID)
 		if err != nil {
 			log.Printf("media group download error: %v", err)
 			continue
 		}
 
-		attName := ts() + ext
-		uploadBytes(attFolderID, attName, data, mime)
-		attachments = append(attachments, attName)
+		uploadBytes(postFolderID, fileName, data, mime)
+		attachments = append(attachments, folderName+"/"+fileName)
 	}
 
 	if len(attachments) == 0 {
@@ -225,25 +273,24 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 	}
 
 	note := buildNote(firstMsg, caption, attachments)
-	fname := makeFilename("media")
-	uploadMD(inboxFolderID, fname, note)
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: entry.chatID,
 		Text:   fmt.Sprintf("📎 %d files", len(attachments)),
 	})
-	log.Printf("media group: %s (%d files)", fname, len(attachments))
+	log.Printf("media group: %s (%d files)", title, len(attachments))
 }
 
 // --- Handlers ---
 
 func handleText(ctx context.Context, b *bot.Bot, msg *models.Message) error {
+	title := makeTitle(msg, msg.Text, "text")
 	note := buildNote(msg, msg.Text, nil)
-	fname := makeFilename("text")
-	uploadMD(inboxFolderID, fname, note)
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "✅"})
-	log.Printf("text: %s", fname)
+	log.Printf("text: %s", title)
 	return nil
 }
 
@@ -254,16 +301,18 @@ func handlePhoto(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 		return fmt.Errorf("download photo: %w", err)
 	}
 
-	attName := ts() + "_photo.jpg"
-	uploadBytes(attFolderID, attName, data, "image/jpeg")
+	title := makeTitle(msg, msg.Caption, "photo")
+	folderName := sanitizeFolderName(title)
+	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
 
-	caption := msg.Caption
-	note := buildNote(msg, caption, []string{attName})
-	fname := makeFilename("photo")
-	uploadMD(inboxFolderID, fname, note)
+	fileName := "photo.jpg"
+	uploadBytes(postFolderID, fileName, data, "image/jpeg")
+
+	note := buildNote(msg, msg.Caption, []string{folderName + "/" + fileName})
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "📸"})
-	log.Printf("photo: %s", fname)
+	log.Printf("photo: %s", title)
 	return nil
 }
 
@@ -274,23 +323,25 @@ func handleDocument(ctx context.Context, b *bot.Bot, msg *models.Message) error 
 		return fmt.Errorf("download doc: %w", err)
 	}
 
-	docName := doc.FileName
-	if docName == "" {
-		docName = ts() + "_file"
+	title := makeTitle(msg, msg.Caption, "doc")
+	folderName := sanitizeFolderName(title)
+	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+
+	fileName := doc.FileName
+	if fileName == "" {
+		fileName = "file"
 	}
 	mime := doc.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	uploadBytes(attFolderID, docName, data, mime)
+	uploadBytes(postFolderID, fileName, data, mime)
 
-	caption := msg.Caption
-	note := buildNote(msg, caption, []string{docName})
-	fname := makeFilename("doc")
-	uploadMD(inboxFolderID, fname, note)
+	note := buildNote(msg, msg.Caption, []string{folderName + "/" + fileName})
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "📎"})
-	log.Printf("doc: %s", docName)
+	log.Printf("doc: %s", title)
 	return nil
 }
 
@@ -300,16 +351,19 @@ func handleVoice(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 		return fmt.Errorf("download voice: %w", err)
 	}
 
-	attName := ts() + "_voice.ogg"
-	uploadBytes(attFolderID, attName, data, "audio/ogg")
+	title := makeTitle(msg, "", "voice")
+	folderName := sanitizeFolderName(title)
+	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+
+	fileName := "voice.ogg"
+	uploadBytes(postFolderID, fileName, data, "audio/ogg")
 
 	content := fmt.Sprintf("🎤 Голосове (%dс)", msg.Voice.Duration)
-	note := buildNote(msg, content, []string{attName})
-	fname := makeFilename("voice")
-	uploadMD(inboxFolderID, fname, note)
+	note := buildNote(msg, content, []string{folderName + "/" + fileName})
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "🎤"})
-	log.Printf("voice: %s", fname)
+	log.Printf("voice: %s", title)
 	return nil
 }
 
@@ -319,16 +373,19 @@ func handleVideoNote(ctx context.Context, b *bot.Bot, msg *models.Message) error
 		return fmt.Errorf("download video note: %w", err)
 	}
 
-	attName := ts() + "_videonote.mp4"
-	uploadBytes(attFolderID, attName, data, "video/mp4")
+	title := makeTitle(msg, "", "videonote")
+	folderName := sanitizeFolderName(title)
+	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+
+	fileName := "videonote.mp4"
+	uploadBytes(postFolderID, fileName, data, "video/mp4")
 
 	content := fmt.Sprintf("🎤 Відеоповідомлення (%dс)", msg.VideoNote.Duration)
-	note := buildNote(msg, content, []string{attName})
-	fname := makeFilename("voice")
-	uploadMD(inboxFolderID, fname, note)
+	note := buildNote(msg, content, []string{folderName + "/" + fileName})
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "🎤"})
-	log.Printf("videonote: %s", fname)
+	log.Printf("videonote: %s", title)
 	return nil
 }
 
@@ -338,16 +395,18 @@ func handleVideo(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 		return fmt.Errorf("download video: %w", err)
 	}
 
-	attName := ts() + "_video.mp4"
-	uploadBytes(attFolderID, attName, data, "video/mp4")
+	title := makeTitle(msg, msg.Caption, "video")
+	folderName := sanitizeFolderName(title)
+	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
 
-	caption := msg.Caption
-	note := buildNote(msg, caption, []string{attName})
-	fname := makeFilename("video")
-	uploadMD(inboxFolderID, fname, note)
+	fileName := "video.mp4"
+	uploadBytes(postFolderID, fileName, data, "video/mp4")
+
+	note := buildNote(msg, msg.Caption, []string{folderName + "/" + fileName})
+	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "🎬"})
-	log.Printf("video: %s", fname)
+	log.Printf("video: %s", title)
 	return nil
 }
 
@@ -530,10 +589,6 @@ func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 
 func ts() string {
 	return time.Now().Format("2006-01-02_15-04-05")
-}
-
-func makeFilename(kind string) string {
-	return fmt.Sprintf("%s_%s.md", ts(), kind)
 }
 
 func mustEnv(key string) string {
