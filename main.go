@@ -71,8 +71,7 @@ func main() {
 	}
 
 	// Ensure folders exist
-	inboxFolderID = mustGetOrCreateFolder(rootFolderID, "inbox")
-	attFolderID = mustGetOrCreateFolder(rootFolderID, "attachments")
+	ensureBaseFolders()
 	log.Printf("inbox=%s attachments=%s", inboxFolderID, attFolderID)
 
 	// Init bot
@@ -529,6 +528,11 @@ func forwardInfo(msg *models.Message) string {
 
 // --- Google Drive ---
 
+func ensureBaseFolders() {
+	inboxFolderID = mustGetOrCreateFolder(rootFolderID, "inbox")
+	attFolderID = mustGetOrCreateFolder(rootFolderID, "attachments")
+}
+
 func mustGetOrCreateFolder(parentID, name string) string {
 	q := fmt.Sprintf("'%s' in parents and name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", parentID, name)
 	list, err := driveService.Files.List().Q(q).Fields("files(id)").Do()
@@ -560,7 +564,16 @@ func uploadBytes(folderID, name string, data []byte, mime string) {
 		Parents: []string{folderID},
 	}).Media(strings.NewReader(string(data))).Do()
 	if err != nil {
-		log.Printf("drive upload error: %v", err)
+		// Folder might have been deleted externally, recreate and retry
+		log.Printf("drive upload error (retrying): %v", err)
+		ensureBaseFolders()
+		_, err = driveService.Files.Create(&drive.File{
+			Name:    name,
+			Parents: []string{folderID},
+		}).Media(strings.NewReader(string(data))).Do()
+		if err != nil {
+			log.Printf("drive upload error: %v", err)
+		}
 	}
 }
 
