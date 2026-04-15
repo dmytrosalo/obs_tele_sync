@@ -28,7 +28,6 @@ var (
 	rootFolderID  string
 	inboxFolderID string
 	attFolderID   string
-	tgAttFolderID string
 	allowedUserID int64
 )
 
@@ -74,8 +73,7 @@ func main() {
 	// Ensure folders exist
 	inboxFolderID = mustGetOrCreateFolder(rootFolderID, "inbox")
 	attFolderID = mustGetOrCreateFolder(rootFolderID, "attachments")
-	tgAttFolderID = mustGetOrCreateFolder(attFolderID, "tg")
-	log.Printf("inbox=%s attachments/tg=%s", inboxFolderID, tgAttFolderID)
+	log.Printf("inbox=%s attachments=%s", inboxFolderID, attFolderID)
 
 	// Init bot
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -227,7 +225,7 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 	firstMsg := entry.msgs[0]
 	title := makeTitle(firstMsg, caption, "media")
 	folderName := sanitizeFolderName(title)
-	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	var attachments []string
 	for i, msg := range entry.msgs {
@@ -306,7 +304,7 @@ func handlePhoto(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 
 	title := makeTitle(msg, msg.Caption, "photo")
 	folderName := sanitizeFolderName(title)
-	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "photo.jpg"
 	uploadBytes(postFolderID, fileName, data, "image/jpeg")
@@ -329,7 +327,7 @@ func handleDocument(ctx context.Context, b *bot.Bot, msg *models.Message) error 
 
 	title := makeTitle(msg, msg.Caption, "doc")
 	folderName := sanitizeFolderName(title)
-	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := doc.FileName
 	if fileName == "" {
@@ -358,7 +356,7 @@ func handleVoice(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 
 	title := makeTitle(msg, "", "voice")
 	folderName := sanitizeFolderName(title)
-	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "voice.ogg"
 	uploadBytes(postFolderID, fileName, data, "audio/ogg")
@@ -380,7 +378,7 @@ func handleVideoNote(ctx context.Context, b *bot.Bot, msg *models.Message) error
 
 	title := makeTitle(msg, "", "videonote")
 	folderName := sanitizeFolderName(title)
-	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "videonote.mp4"
 	uploadBytes(postFolderID, fileName, data, "video/mp4")
@@ -402,7 +400,7 @@ func handleVideo(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 
 	title := makeTitle(msg, msg.Caption, "video")
 	folderName := sanitizeFolderName(title)
-	postFolderID := mustGetOrCreateFolder(tgAttFolderID, folderName)
+	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "video.mp4"
 	uploadBytes(postFolderID, fileName, data, "video/mp4")
