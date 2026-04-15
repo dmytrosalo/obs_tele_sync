@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -28,6 +29,21 @@ var (
 	attFolderID   string
 	allowedUserID int64
 )
+
+// --- Media group buffering ---
+
+type mediaGroupEntry struct {
+	msgs  []*models.Message
+	timer *time.Timer
+	chatID int64
+}
+
+var (
+	mediaGroups   = make(map[string]*mediaGroupEntry)
+	mediaGroupsMu sync.Mutex
+)
+
+const mediaGroupWait = 1500 * time.Millisecond
 
 func main() {
 	token := mustEnv("BOT_TOKEN")
@@ -88,6 +104,12 @@ func router(ctx context.Context, b *bot.Bot, upd *models.Update) {
 		return
 	}
 
+	// Media group handling
+	if msg.MediaGroupID != "" {
+		bufferMediaGroup(ctx, b, msg)
+		return
+	}
+
 	var err error
 	switch {
 	case msg.Voice != nil:
@@ -116,6 +138,103 @@ func router(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	}
 }
 
+// --- Media group ---
+
+func bufferMediaGroup(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	mediaGroupsMu.Lock()
+	defer mediaGroupsMu.Unlock()
+
+	entry, exists := mediaGroups[msg.MediaGroupID]
+	if exists {
+		entry.timer.Reset(mediaGroupWait)
+		entry.msgs = append(entry.msgs, msg)
+	} else {
+		entry = &mediaGroupEntry{
+			msgs:   []*models.Message{msg},
+			chatID: msg.Chat.ID,
+		}
+		groupID := msg.MediaGroupID
+		entry.timer = time.AfterFunc(mediaGroupWait, func() {
+			flushMediaGroup(ctx, b, groupID)
+		})
+		mediaGroups[msg.MediaGroupID] = entry
+	}
+}
+
+func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
+	mediaGroupsMu.Lock()
+	entry, exists := mediaGroups[groupID]
+	delete(mediaGroups, groupID)
+	mediaGroupsMu.Unlock()
+
+	if !exists || len(entry.msgs) == 0 {
+		return
+	}
+
+	var attachments []string
+	var caption string
+	firstMsg := entry.msgs[0]
+
+	for i, msg := range entry.msgs {
+		var fileID string
+		var ext string
+		var mime string
+
+		switch {
+		case msg.Photo != nil:
+			photo := msg.Photo[len(msg.Photo)-1]
+			fileID = photo.FileID
+			ext = fmt.Sprintf("_photo_%d.jpg", i+1)
+			mime = "image/jpeg"
+		case msg.Video != nil:
+			fileID = msg.Video.FileID
+			ext = fmt.Sprintf("_video_%d.mp4", i+1)
+			mime = "video/mp4"
+		case msg.Document != nil:
+			fileID = msg.Document.FileID
+			if msg.Document.FileName != "" {
+				ext = "_" + msg.Document.FileName
+			} else {
+				ext = fmt.Sprintf("_doc_%d", i+1)
+			}
+			mime = msg.Document.MimeType
+			if mime == "" {
+				mime = "application/octet-stream"
+			}
+		default:
+			continue
+		}
+
+		if msg.Caption != "" {
+			caption = msg.Caption
+		}
+
+		data, err := downloadFile(ctx, b, fileID)
+		if err != nil {
+			log.Printf("media group download error: %v", err)
+			continue
+		}
+
+		attName := ts() + ext
+		uploadBytes(attFolderID, attName, data, mime)
+		attachments = append(attachments, attName)
+	}
+
+	if len(attachments) == 0 {
+		return
+	}
+
+	note := buildNote(firstMsg, caption, attachments)
+	fname := makeFilename("media")
+	uploadMD(inboxFolderID, fname, note)
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: entry.chatID,
+		Text:   fmt.Sprintf("📎 %d files", len(attachments)),
+	})
+	log.Printf("media group: %s (%d files)", fname, len(attachments))
+}
+
 // --- Handlers ---
 
 func handleText(ctx context.Context, b *bot.Bot, msg *models.Message) error {
@@ -129,7 +248,6 @@ func handleText(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 }
 
 func handlePhoto(ctx context.Context, b *bot.Bot, msg *models.Message) error {
-	// Largest photo
 	photo := msg.Photo[len(msg.Photo)-1]
 	data, err := downloadFile(ctx, b, photo.FileID)
 	if err != nil {
