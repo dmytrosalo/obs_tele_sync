@@ -215,9 +215,11 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 
 	// Find caption from any message in the group
 	var caption string
+	var captionContent string
 	for _, msg := range entry.msgs {
 		if msg.Caption != "" {
 			caption = msg.Caption
+			captionContent = entitiesToMarkdown(msg.Caption, msg.CaptionEntities)
 			break
 		}
 	}
@@ -272,7 +274,7 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 		return
 	}
 
-	note := buildNote(firstMsg, caption, attachments)
+	note := buildNote(firstMsg, captionContent, attachments)
 	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
@@ -285,8 +287,9 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 // --- Handlers ---
 
 func handleText(ctx context.Context, b *bot.Bot, msg *models.Message) error {
+	content := getContent(msg)
 	title := makeTitle(msg, msg.Text, "text")
-	note := buildNote(msg, msg.Text, nil)
+	note := buildNote(msg, content, nil)
 	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "✅"})
@@ -308,7 +311,8 @@ func handlePhoto(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 	fileName := "photo.jpg"
 	uploadBytes(postFolderID, fileName, data, "image/jpeg")
 
-	note := buildNote(msg, msg.Caption, []string{folderName + "/" + fileName})
+	content := getContent(msg)
+	note := buildNote(msg, content, []string{folderName + "/" + fileName})
 	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "📸"})
@@ -337,7 +341,8 @@ func handleDocument(ctx context.Context, b *bot.Bot, msg *models.Message) error 
 	}
 	uploadBytes(postFolderID, fileName, data, mime)
 
-	note := buildNote(msg, msg.Caption, []string{folderName + "/" + fileName})
+	content := getContent(msg)
+	note := buildNote(msg, content, []string{folderName + "/" + fileName})
 	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "📎"})
@@ -402,12 +407,67 @@ func handleVideo(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 	fileName := "video.mp4"
 	uploadBytes(postFolderID, fileName, data, "video/mp4")
 
-	note := buildNote(msg, msg.Caption, []string{folderName + "/" + fileName})
+	content := getContent(msg)
+	note := buildNote(msg, content, []string{folderName + "/" + fileName})
 	uploadMD(inboxFolderID, title+".md", note)
 
 	b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "🎬"})
 	log.Printf("video: %s", title)
 	return nil
+}
+
+// --- Entity to Markdown ---
+
+func entitiesToMarkdown(text string, entities []models.MessageEntity) string {
+	if len(entities) == 0 {
+		return text
+	}
+
+	runes := []rune(text)
+	// Process entities from end to start so offsets stay valid
+	for i := len(entities) - 1; i >= 0; i-- {
+		e := entities[i]
+		start := e.Offset
+		end := e.Offset + e.Length
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunk := string(runes[start:end])
+
+		var replacement string
+		switch e.Type {
+		case models.MessageEntityTypeTextLink:
+			replacement = fmt.Sprintf("[%s](%s)", chunk, e.URL)
+		case models.MessageEntityTypeURL:
+			replacement = fmt.Sprintf("[%s](%s)", chunk, chunk)
+		case models.MessageEntityTypeBold:
+			replacement = "**" + chunk + "**"
+		case models.MessageEntityTypeItalic:
+			replacement = "*" + chunk + "*"
+		case models.MessageEntityTypeCode:
+			replacement = "`" + chunk + "`"
+		case models.MessageEntityTypePre:
+			replacement = "```\n" + chunk + "\n```"
+		case models.MessageEntityTypeStrikethrough:
+			replacement = "~~" + chunk + "~~"
+		default:
+			continue
+		}
+
+		runes = append(runes[:start], append([]rune(replacement), runes[end:]...)...)
+	}
+
+	return string(runes)
+}
+
+func getContent(msg *models.Message) string {
+	if msg.Text != "" {
+		return entitiesToMarkdown(msg.Text, msg.Entities)
+	}
+	if msg.Caption != "" {
+		return entitiesToMarkdown(msg.Caption, msg.CaptionEntities)
+	}
+	return ""
 }
 
 // --- Note builder ---
