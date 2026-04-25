@@ -93,16 +93,18 @@ func makeTitle(msg *models.Message, content string, kind string) string {
 	fwd := forwardInfo(msg)
 	summary := truncate(firstLine(content), 50)
 
+	var raw string
 	switch {
 	case fwd != "" && summary != "":
-		return fmt.Sprintf("[tg] %s - %s", fwd, summary)
+		raw = fmt.Sprintf("[tg] %s - %s", fwd, summary)
 	case fwd != "":
-		return fmt.Sprintf("[tg] %s", fwd)
+		raw = fmt.Sprintf("[tg] %s", fwd)
 	case summary != "":
-		return fmt.Sprintf("[tg] %s", summary)
+		raw = fmt.Sprintf("[tg] %s", summary)
 	default:
-		return fmt.Sprintf("[tg] %s %s", kind, time.Now().Format("2006-01-02"))
+		raw = fmt.Sprintf("[tg] %s %s", kind, time.Now().Format("2006-01-02"))
 	}
+	return sanitizeName(raw)
 }
 
 func firstLine(s string) string {
@@ -121,9 +123,12 @@ func truncate(s string, maxChars int) string {
 	return string(runes[:maxChars]) + "..."
 }
 
-func sanitizeFolderName(name string) string {
+// sanitizeName strips characters disallowed by Android FAT/exFAT filesystems
+// (Autosync errors with "filename cannot be used on Android" otherwise) and
+// trims trailing dots/spaces, which break Windows/FAT file creation.
+func sanitizeName(name string) string {
 	r := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
-	return r.Replace(name)
+	return strings.TrimRight(r.Replace(name), ". ")
 }
 
 // --- Router ---
@@ -223,7 +228,7 @@ func flushMediaGroup(ctx context.Context, b *bot.Bot, groupID string) {
 
 	firstMsg := entry.msgs[0]
 	title := makeTitle(firstMsg, caption, "media")
-	folderName := sanitizeFolderName(title)
+	folderName := title
 	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	var attachments []string
@@ -302,7 +307,7 @@ func handlePhoto(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 	}
 
 	title := makeTitle(msg, msg.Caption, "photo")
-	folderName := sanitizeFolderName(title)
+	folderName := title
 	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "photo.jpg"
@@ -325,7 +330,7 @@ func handleDocument(ctx context.Context, b *bot.Bot, msg *models.Message) error 
 	}
 
 	title := makeTitle(msg, msg.Caption, "doc")
-	folderName := sanitizeFolderName(title)
+	folderName := title
 	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := doc.FileName
@@ -354,7 +359,7 @@ func handleVoice(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 	}
 
 	title := makeTitle(msg, "", "voice")
-	folderName := sanitizeFolderName(title)
+	folderName := title
 	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "voice.ogg"
@@ -376,7 +381,7 @@ func handleVideoNote(ctx context.Context, b *bot.Bot, msg *models.Message) error
 	}
 
 	title := makeTitle(msg, "", "videonote")
-	folderName := sanitizeFolderName(title)
+	folderName := title
 	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "videonote.mp4"
@@ -398,7 +403,7 @@ func handleVideo(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 	}
 
 	title := makeTitle(msg, msg.Caption, "video")
-	folderName := sanitizeFolderName(title)
+	folderName := title
 	postFolderID := mustGetOrCreateFolder(attFolderID, folderName)
 
 	fileName := "video.mp4"
