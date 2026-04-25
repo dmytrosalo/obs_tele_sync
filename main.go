@@ -531,6 +531,23 @@ func forwardInfo(msg *models.Message) string {
 func ensureBaseFolders() {
 	inboxFolderID = mustGetOrCreateFolder(rootFolderID, "inbox")
 	attFolderID = mustGetOrCreateFolder(rootFolderID, "attachments")
+	ensureKeepFile(inboxFolderID)
+	ensureKeepFile(attFolderID)
+}
+
+// ensureKeepFile drops a .keep placeholder so Obsidian's "remove empty folders"
+// setting (and any equivalent sync cleanup) doesn't trash the folder.
+func ensureKeepFile(folderID string) {
+	q := fmt.Sprintf("'%s' in parents and name='.keep' and trashed=false", folderID)
+	list, err := driveService.Files.List().Q(q).Fields("files(id)").Do()
+	if err != nil {
+		log.Printf(".keep check failed for %s: %v", folderID, err)
+		return
+	}
+	if len(list.Files) > 0 {
+		return
+	}
+	uploadBytes(folderID, ".keep", []byte("keep\n"), "text/plain")
 }
 
 func mustGetOrCreateFolder(parentID, name string) string {
